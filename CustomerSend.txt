@@ -1,0 +1,73 @@
+   declare
+   l_count NUMBER;
+   l_locked NUMBER;
+   l_updated NUMBER;
+   l_rowcount NUMBER;
+   TYPE cust_code_t IS TABLE OF TEMP_MON.XX_CUSTOMERS_TEMP_OUT.cust_code%TYPE INDEX BY PLS_INTEGER;
+   l_done_codes cust_code_t;
+   cursor remote_insert_cust IS
+   select c.cust_code "ClientNumber", c.cust_name "Company", c.MAIL_ADDRESS_LINE1 || ' ' || c.MAIL_ADDRESS_LINE2 "Street", c.country "Country",  c.currency "CurrencyFormat",
+   c.seller "SalesRep", cc.reference_name "Name", cc.phone "Phone", cc.MOB_PHONE "CellPhone", email "EMail", case when mca.processed_date > ca.processed_date then 'U' else 'I' end op
+   from TEMP_MON.XX_CUSTOMERS_TEMP_OUT c LEFT JOIN TEMP_MON.XX_CUST_CONTACTS_TEMP_OUT cc ON cc.cust_code = c.cust_code
+                                            LEFT JOIN  (select cust_code, max(processed_date) processed_date from TEMP_IDB.XX_CUST_API group by cust_code) ca ON ca.cust_code = c.cust_code
+                                            LEFT JOIN  (select cust_code, max(processed_date) processed_date from TEMP_MON.XX_CUST_API group by cust_code) mca ON mca.cust_code = c.cust_code
+   where ca.cust_code is null OR mca.processed_date > ca.processed_date ;
+   BEGIN
+   l_count := 0;
+   FOR rec in remote_insert_cust LOOP
+    l_locked := 0;
+    l_updated := 0;
+    IF rec.op = 'I' THEN
+       INSERT INTO customer@XEIDBARU (
+       "ClientNumber", "Company", "Street", "Country", "CurrencyFormat", "SalesRep", "Name", "Phone", "CellPhone", "EMail", "Locked", "Updated"
+       ) VALUES (
+       rec."ClientNumber", rec."Company", rec."Street", rec."Country", rec."CurrencyFormat", rec."SalesRep", rec."Name", rec."Phone", rec."CellPhone", rec."EMail", 0, 1
+       );   
+       l_rowcount := SQL%ROWCOUNT;
+     ELSE   
+        UPDATE customer@XEIDBARU SET
+        "Company" = rec."Company", 
+        "Street" = rec."Street", 
+        "Country" = rec."Country", 
+        "CurrencyFormat" = rec."CurrencyFormat", 
+        "SalesRep" = rec."SalesRep", 
+        "Name" = rec."Name", 
+        "Phone" = rec."Phone", 
+        "CellPhone" = rec."CellPhone", 
+        "EMail" = rec."EMail"
+        WHERE "ClientNumber" = rec."ClientNumber"
+        RETURNING "Locked", "Updated"
+        INTO l_locked, l_updated;
+        l_rowcount := SQL%ROWCOUNT;
+        IF l_rowcount = 0 THEN
+           INSERT INTO customer@XEIDBARU (
+               "ClientNumber", "Company", "Street", "Country", "CurrencyFormat", "SalesRep", "Name", "Phone", "CellPhone", "EMail", "Locked", "Updated"
+               ) VALUES (
+               rec."ClientNumber", rec."Company", rec."Street", rec."Country", rec."CurrencyFormat", rec."SalesRep", rec."Name", rec."Phone", rec."CellPhone", rec."EMail", 0, 1
+               );   
+               l_rowcount := SQL%ROWCOUNT;
+        ELSIF l_locked = 1 OR l_updated = 1 THEN
+            l_rowcount := 0;
+            rollback;
+        END IF;
+    END IF;
+    IF l_rowcount > 0 THEN
+      commit;
+      l_count := l_count + 1; -- TEMP assignment DELETE
+      l_done_codes(l_count) := rec."ClientNumber";
+    END IF;
+   END LOOP;
+   IF l_count > 0 THEN
+   commit;
+   FORALL indx in l_done_codes.FIRST .. l_done_codes.LAST
+   insert into TEMP_IDB.XX_CUST_API (
+     cust_code, processed_date
+   ) VALUES (
+     l_done_codes(indx), sysdate
+   );
+   commit;
+   END IF;
+--   EXCEPTION
+--     WHEN OTHERS THEN
+--       rollback;
+   END;
